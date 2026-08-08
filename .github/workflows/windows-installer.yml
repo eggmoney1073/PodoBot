@@ -49,8 +49,8 @@ jobs:
           }
           "@ | Set-Content -Encoding UTF8 "src/PodoBot/EmbeddedChzzkConfig.cs"
 
-      - name: Restore
-        run: dotnet restore PodoBot.sln
+      - name: Restore for Windows x64
+        run: dotnet restore src/PodoBot/PodoBot.csproj -r win-x64
 
       - name: Publish PodoBot
         shell: pwsh
