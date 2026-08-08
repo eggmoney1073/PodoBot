@@ -1,7 +1,6 @@
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Text.Json;
+using SocketIOClient;
+using SocketIOClient.Common;
 
 namespace PodoBot;
 
@@ -34,7 +33,7 @@ public sealed class ChzzkSessionClient : IAsyncDisposable
             EIO = EngineIO.V3,
             Reconnection = true,
             ReconnectionAttempts = 8,
-            ReconnectionDelay = 1500,
+            ReconnectionDelayMax = 1500,
             ConnectionTimeout = TimeSpan.FromSeconds(12),
             Transport = TransportProtocol.WebSocket,
             AutoUpgrade = false
