@@ -22,7 +22,6 @@ public sealed class LocalDataStore
         DirectoryPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "PodoBot");
-
         DataPath = Path.Combine(DirectoryPath, "settings.json");
         Directory.CreateDirectory(DirectoryPath);
         Data = Load();
@@ -35,16 +34,33 @@ public sealed class LocalDataStore
             if (!File.Exists(DataPath))
                 return AppData.Default();
 
-            var data = JsonSerializer.Deserialize<AppData>(
-                File.ReadAllText(DataPath),
-                _json);
+            var data = JsonSerializer.Deserialize<AppData>(File.ReadAllText(DataPath), _json);
+            if (data is null)
+                return AppData.Default();
 
-            return data ?? AppData.Default();
+            Migrate(data);
+            return data;
         }
         catch
         {
             return AppData.Default();
         }
+    }
+
+    private static void Migrate(AppData data)
+    {
+        if (data.DataVersion >= 2)
+            return;
+
+        var sample = data.Commands.FirstOrDefault(x =>
+            x.Trigger == "!공지"
+            && x.Response == "오늘 방송도 재밌게 봐주세요!"
+            && x.Permission == "전체");
+
+        if (sample is not null)
+            sample.Enabled = true;
+
+        data.DataVersion = 2;
     }
 
     public async Task SaveAsync()
@@ -53,10 +69,7 @@ public sealed class LocalDataStore
         try
         {
             var temp = DataPath + ".tmp";
-            await File.WriteAllTextAsync(
-                temp,
-                JsonSerializer.Serialize(Data, _json));
-
+            await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(Data, _json));
             File.Move(temp, DataPath, true);
         }
         finally
