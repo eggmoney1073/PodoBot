@@ -2,7 +2,7 @@ namespace PodoBot;
 
 public sealed class AppData
 {
-    public int DataVersion { get; set; } = 2;
+    public int DataVersion { get; set; } = 3;
     public List<BotCommand> Commands { get; set; } = new();
     public List<RouletteItem> RouletteItems { get; set; } = new();
     public RouletteSettings Roulette { get; set; } = new();
@@ -13,7 +13,7 @@ public sealed class AppData
     {
         return new AppData
         {
-            DataVersion = 2,
+            DataVersion = 3,
             Commands =
             [
                 new BotCommand
@@ -69,8 +69,8 @@ public sealed class RouletteSettings
     public bool Enabled { get; set; } = true;
     public string Trigger { get; set; } = "!룰렛";
     public string Response { get; set; } = "[룰렛] {user} -> {result}";
-    public int CooldownSeconds { get; set; } = 10;
-    public int UserCooldownSeconds { get; set; } = 30;
+    public int CooldownSeconds { get; set; }
+    public int UserCooldownSeconds { get; set; }
     public string Permission { get; set; } = "전체";
 }
 
@@ -112,6 +112,16 @@ public sealed class AuthTokens
     public string ChannelName { get; set; } = "";
 }
 
-public sealed record TokenResult(string AccessToken, string RefreshToken, int ExpiresInSeconds);
-public sealed record MeResult(string ChannelId, string ChannelName);
-public sealed record RouletteResult(string Text, int Index, string User);
+public sealed record TokenResult(
+    string AccessToken,
+    string RefreshToken,
+    int ExpiresInSeconds);
+
+public sealed record MeResult(
+    string ChannelId,
+    string ChannelName);
+
+public sealed record RouletteResult(
+    string Text,
+    int Index,
+    string User);

@@ -13,7 +13,8 @@ public sealed class OverlayServer : IAsyncDisposable
     public const string OverlayUrl = "http://localhost:18766/roulette";
     public const string CallbackUrl = "http://localhost:18766/auth/callback";
 
-    private static readonly TimeSpan LateJoinReplayWindow = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan LateJoinReplayWindow =
+        TimeSpan.FromSeconds(15);
 
     private readonly LocalDataStore _store;
     private readonly ConcurrentDictionary<Guid, Channel<string>> _clients = new();
@@ -50,7 +51,8 @@ public sealed class OverlayServer : IAsyncDisposable
             try
             {
                 if (AuthorizationHandler is null)
-                    throw new InvalidOperationException("로그인 처리가 준비되지 않았습니다.");
+                    throw new InvalidOperationException(
+                        "로그인 처리가 준비되지 않았습니다.");
 
                 await AuthorizationHandler(code, state);
 
@@ -73,11 +75,19 @@ public sealed class OverlayServer : IAsyncDisposable
             }
         });
 
-        _app.MapGet("/api/roulette", () => Results.Json(
-            _store.Data.RouletteItems
-                .Where(x => x.ChancePercent > 0 && !string.IsNullOrWhiteSpace(x.Text))
-                .Select(x => new { text = x.Text, chance = x.ChancePercent })
-                .ToArray()));
+        _app.MapGet(
+            "/api/roulette",
+            () => Results.Json(
+                _store.Data.RouletteItems
+                    .Where(x =>
+                        x.ChancePercent > 0
+                        && !string.IsNullOrWhiteSpace(x.Text))
+                    .Select(x => new
+                    {
+                        text = x.Text,
+                        chance = x.ChancePercent
+                    })
+                    .ToArray()));
 
         _app.MapGet("/events", async (HttpContext context) =>
         {
@@ -90,14 +100,20 @@ public sealed class OverlayServer : IAsyncDisposable
             _clients[id] = channel;
 
             var replay = GetRecentRoulettePayload();
+
             if (replay is not null)
                 channel.Writer.TryWrite(replay);
 
             try
             {
-                await foreach (var payload in channel.Reader.ReadAllAsync(context.RequestAborted))
+                await foreach (
+                    var payload
+                    in channel.Reader.ReadAllAsync(
+                        context.RequestAborted))
                 {
-                    await context.Response.WriteAsync($"data: {payload}\n\n");
+                    await context.Response.WriteAsync(
+                        $"data: {payload}\n\n");
+
                     await context.Response.Body.FlushAsync();
                 }
             }
@@ -112,19 +128,32 @@ public sealed class OverlayServer : IAsyncDisposable
 
         _app.MapGet("/roulette", (HttpContext context) =>
         {
-            context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
-            return Results.Content(OverlayHtml, "text/html; charset=utf-8");
+            context.Response.Headers.CacheControl =
+                "no-store, no-cache, must-revalidate";
+
+            return Results.Content(
+                OverlayHtml,
+                "text/html; charset=utf-8");
         });
 
         await _app.StartAsync();
-        Log?.Invoke($"OBS 오버레이 준비 완료: {OverlayUrl}");
+
+        Log?.Invoke(
+            $"OBS 오버레이 준비 완료: {OverlayUrl}");
     }
 
-    public async Task PublishRouletteAsync(RouletteResult result)
+    public async Task PublishRouletteAsync(
+        RouletteResult result)
     {
         var items = _store.Data.RouletteItems
-            .Where(x => x.ChancePercent > 0 && !string.IsNullOrWhiteSpace(x.Text))
-            .Select(x => new { text = x.Text, chance = x.ChancePercent })
+            .Where(x =>
+                x.ChancePercent > 0
+                && !string.IsNullOrWhiteSpace(x.Text))
+            .Select(x => new
+            {
+                text = x.Text,
+                chance = x.ChancePercent
+            })
             .ToArray();
 
         var json = JsonSerializer.Serialize(new
@@ -153,8 +182,13 @@ public sealed class OverlayServer : IAsyncDisposable
         {
             if (_lastRoulettePayload is null)
                 return null;
-            if (DateTime.UtcNow - _lastRouletteAtUtc > LateJoinReplayWindow)
+
+            if (DateTime.UtcNow - _lastRouletteAtUtc
+                > LateJoinReplayWindow)
+            {
                 return null;
+            }
+
             return _lastRoulettePayload;
         }
     }
@@ -192,7 +226,9 @@ body.preview #previewBadge{display:block}
 <div id="previewBadge">미리보기 · OBS에서는 평소 투명하게 표시됩니다</div>
 <div id="stage">
   <div id="wrap">
-    <div id="pointer"></div><div id="wheel"></div><div id="hub">PODO</div>
+    <div id="pointer"></div>
+    <div id="wheel"></div>
+    <div id="hub">PODO</div>
   </div>
   <div id="result"></div>
 </div>
@@ -201,32 +237,107 @@ const stage=document.querySelector('#stage');
 const wheel=document.querySelector('#wheel');
 const result=document.querySelector('#result');
 const colors=['#8b6de3','#67c6c0','#f1a5bd','#f5cc74','#8eb8ed','#a7d88d','#f0a26e','#c39be8'];
+
 const params=new URLSearchParams(location.search);
 const forcedPreview=params.get('preview')==='1';
 const isObs=typeof window.obsstudio!=='undefined';
 const preview=forcedPreview||!isObs;
-if(preview){document.body.classList.add('preview');stage.classList.add('show');}
+
+if(preview){
+  document.body.classList.add('preview');
+  stage.classList.add('show');
+}
+
 let rotation=0;
 let lastEventId='';
+let resultTimer=null;
+let hideTimer=null;
+
 function paint(items){
- let a=0,p=[];
- for(let i=0;i<items.length;i++){let s=a;a+=+items[i].chance||0;p.push(`${colors[i%colors.length]} ${s*3.6}deg ${a*3.6}deg`)}
- wheel.style.background=items.length?`conic-gradient(${p.join(',')})`:'#ddd';
+  let a=0,p=[];
+
+  for(let i=0;i<items.length;i++){
+    const s=a;
+    a+=+items[i].chance||0;
+    p.push(`${colors[i%colors.length]} ${s*3.6}deg ${a*3.6}deg`);
+  }
+
+  wheel.style.background=
+    items.length
+      ? `conic-gradient(${p.join(',')})`
+      : '#ddd';
 }
-function angle(items,index){let a=0;for(let i=0;i<index;i++)a+=+items[i].chance||0;return (a+(+items[index]?.chance||0)/2)*3.6}
+
+function angle(items,index){
+  let a=0;
+
+  for(let i=0;i<index;i++)
+    a+=+items[i].chance||0;
+
+  return (a+(+items[index]?.chance||0)/2)*3.6;
+}
+
 function play(d){
- if(d.eventId&&d.eventId===lastEventId)return;
- lastEventId=d.eventId||'';
- paint(d.items||[]);stage.classList.add('show');result.classList.remove('show');
- const target=angle(d.items||[],d.index);const base=2160;
- rotation+=base+(360-target)+(360-(rotation%360));
- wheel.style.transform=`rotate(${rotation}deg)`;
- setTimeout(()=>{result.textContent=`${d.user} → ${d.result}`;result.classList.add('show')},3500);
- setTimeout(()=>{result.classList.remove('show');if(!preview)stage.classList.remove('show')},6500);
+  if(d.eventId&&d.eventId===lastEventId)
+    return;
+
+  lastEventId=d.eventId||'';
+
+  if(resultTimer!==null){
+    clearTimeout(resultTimer);
+    resultTimer=null;
+  }
+
+  if(hideTimer!==null){
+    clearTimeout(hideTimer);
+    hideTimer=null;
+  }
+
+  paint(d.items||[]);
+  stage.classList.add('show');
+  result.classList.remove('show');
+
+  const target=angle(d.items||[],d.index);
+  const base=2160;
+
+  rotation+=
+    base
+    +(360-target)
+    +(360-(rotation%360));
+
+  wheel.style.transform=
+    `rotate(${rotation}deg)`;
+
+  resultTimer=setTimeout(()=>{
+    result.textContent=
+      `${d.user} → ${d.result}`;
+
+    result.classList.add('show');
+  },3500);
+
+  hideTimer=setTimeout(()=>{
+    result.classList.remove('show');
+
+    if(!preview)
+      stage.classList.remove('show');
+  },6500);
 }
+
 const events=new EventSource('/events');
-events.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='roulette')play(d)}catch{}};
-fetch('/api/roulette',{cache:'no-store'}).then(r=>r.json()).then(paint).catch(()=>paint([]));
+
+events.onmessage=e=>{
+  try{
+    const d=JSON.parse(e.data);
+
+    if(d.type==='roulette')
+      play(d);
+  }catch{}
+};
+
+fetch('/api/roulette',{cache:'no-store'})
+  .then(r=>r.json())
+  .then(paint)
+  .catch(()=>paint([]));
 </script>
 </body>
 </html>
