@@ -297,7 +297,13 @@ public sealed class ChzzkSessionClient : IAsyncDisposable
             doc.RootElement[0].GetString() ?? "";
 
         var data =
-            doc.RootElement[1].Clone();
+            NormalizeEventData(doc.RootElement[1]);
+
+        if (data.ValueKind == JsonValueKind.Undefined
+            || data.ValueKind == JsonValueKind.Null)
+        {
+            return;
+        }
 
         if (eventName == "SYSTEM")
         {
@@ -329,6 +335,21 @@ public sealed class ChzzkSessionClient : IAsyncDisposable
                     $"채팅 처리 오류: {ex.Message}");
             }
         }
+    }
+
+    private static JsonElement NormalizeEventData(
+        JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.String)
+            return data.Clone();
+
+        var json = data.GetString();
+
+        if (string.IsNullOrWhiteSpace(json))
+            return default;
+
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.Clone();
     }
 
     private async Task HandleSystemAsync(
