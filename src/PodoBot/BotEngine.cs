@@ -13,10 +13,7 @@ public sealed class BotEngine
 
     public event Action<string>? Log;
 
-    public BotEngine(
-        LocalDataStore store,
-        Func<string, Task> send,
-        Func<RouletteResult, Task> rouletteOverlay)
+    public BotEngine(LocalDataStore store, Func<string, Task> send, Func<RouletteResult, Task> rouletteOverlay)
     {
         _store = store;
         _send = send;
@@ -26,28 +23,66 @@ public sealed class BotEngine
     public void NotifyOutgoing(string text)
     {
         lock (_sync)
-        {
             _outgoing[text] = DateTime.UtcNow.AddSeconds(8);
-        }
     }
 
     public async Task ProcessAsync(ChatEvent chat)
     {
-        if (string.IsNullOrWhiteSpace(chat.Content))
-            return;
-
-        if (IsBotEcho(chat.Content))
+        if (string.IsNullOrWhiteSpace(chat.Content) || IsBotEcho(chat.Content))
             return;
 
         Log?.Invoke($"{chat.Nickname}: {chat.Content}");
 
+        if (await TryBuiltInCommandListAsync(chat))
+            return;
         if (await TryCommandAsync(chat))
             return;
-
         if (await TryRouletteAsync(chat))
             return;
 
         await TryCounterAsync(chat);
+    }
+
+    private async Task<bool> TryBuiltInCommandListAsync(ChatEvent chat)
+    {
+        var content = chat.Content.Trim();
+        if (!content.Equals("!명령어", StringComparison.OrdinalIgnoreCase)
+            && !content.Equals("!commands", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (!Acquire($"builtin:commands:user:{chat.SenderChannelId}", 3))
+            return true;
+
+        var triggers = new List<string> { "!명령어", "!commands" };
+
+        triggers.AddRange(_store.Data.Commands
+            .Where(x => x.Enabled && !string.IsNullOrWhiteSpace(x.Trigger))
+            .Select(x => x.Trigger.Trim()));
+
+        if (_store.Data.Roulette.Enabled && !string.IsNullOrWhiteSpace(_store.Data.Roulette.Trigger))
+            triggers.Add(_store.Data.Roulette.Trigger.Trim());
+
+        triggers.AddRange(_store.Data.Counters
+            .Where(x => x.Enabled && !string.IsNullOrWhiteSpace(x.Trigger))
+            .Select(x => x.Trigger.Trim()));
+
+        var distinct = triggers.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        const string prefix = "사용 가능 명령어: ";
+        var text = prefix;
+
+        foreach (var trigger in distinct)
+        {
+            var next = text == prefix ? prefix + trigger : text + ", " + trigger;
+            if (next.Length > 95)
+            {
+                text += ", ...";
+                break;
+            }
+            text = next;
+        }
+
+        await _send(text);
+        return true;
     }
 
     private async Task<bool> TryCommandAsync(ChatEvent chat)
@@ -56,51 +91,34 @@ public sealed class BotEngine
         {
             if (!Match(chat.Content, command.Trigger, out var args))
                 continue;
-
             if (!HasPermission(command.Permission, chat.UserRoleCode))
                 return true;
-
             if (!Acquire($"cmd:{command.Id}:all", command.CooldownSeconds))
                 return true;
-
-            if (!Acquire(
-                    $"cmd:{command.Id}:user:{chat.SenderChannelId}",
-                    command.UserCooldownSeconds))
+            if (!Acquire($"cmd:{command.Id}:user:{chat.SenderChannelId}", command.UserCooldownSeconds))
                 return true;
 
-            var text = command.Response
-                .Replace("{user}", chat.Nickname)
-                .Replace("{args}", args);
-
+            var text = command.Response.Replace("{user}", chat.Nickname).Replace("{args}", args);
             await _send(text);
             return true;
         }
-
         return false;
     }
 
     private async Task<bool> TryRouletteAsync(ChatEvent chat)
     {
         var settings = _store.Data.Roulette;
-
-        if (!settings.Enabled
-            || !Match(chat.Content, settings.Trigger, out _))
+        if (!settings.Enabled || !Match(chat.Content, settings.Trigger, out _))
             return false;
-
         if (!HasPermission(settings.Permission, chat.UserRoleCode))
             return true;
-
         if (!Acquire("roulette:all", settings.CooldownSeconds))
             return true;
-
-        if (!Acquire(
-                $"roulette:user:{chat.SenderChannelId}",
-                settings.UserCooldownSeconds))
+        if (!Acquire($"roulette:user:{chat.SenderChannelId}", settings.UserCooldownSeconds))
             return true;
 
         var items = _store.Data.RouletteItems
-            .Where(x => !string.IsNullOrWhiteSpace(x.Text)
-                        && x.ChancePercent > 0)
+            .Where(x => !string.IsNullOrWhiteSpace(x.Text) && x.ChancePercent > 0)
             .ToList();
 
         var total = items.Sum(x => x.ChancePercent);
@@ -113,7 +131,6 @@ public sealed class BotEngine
         var roll = RandomNumberGenerator.GetInt32(0, 1_000_000) / 10_000.0;
         var sum = 0.0;
         var index = items.Count - 1;
-
         for (var i = 0; i < items.Count; i++)
         {
             sum += items[i].ChancePercent;
@@ -125,14 +142,9 @@ public sealed class BotEngine
         }
 
         var result = items[index];
-        var text = settings.Response
-            .Replace("{user}", chat.Nickname)
-            .Replace("{result}", result.Text);
-
+        var text = settings.Response.Replace("{user}", chat.Nickname).Replace("{result}", result.Text);
         await _send(text);
-        await _rouletteOverlay(
-            new RouletteResult(result.Text, index, chat.Nickname));
-
+        await _rouletteOverlay(new RouletteResult(result.Text, index, chat.Nickname));
         Log?.Invoke($"룰렛 결과: {chat.Nickname} -> {result.Text}");
         return true;
     }
@@ -143,7 +155,6 @@ public sealed class BotEngine
         {
             if (!Match(chat.Content, counter.Trigger, out _))
                 continue;
-
             if (!HasPermission(counter.Permission, chat.UserRoleCode))
                 return true;
 
@@ -152,7 +163,6 @@ public sealed class BotEngine
             await _send($"{counter.Name}: {counter.Value}");
             return true;
         }
-
         return false;
     }
 
@@ -161,21 +171,14 @@ public sealed class BotEngine
         lock (_sync)
         {
             var now = DateTime.UtcNow;
-
-            foreach (var key in _outgoing
-                         .Where(x => x.Value <= now)
-                         .Select(x => x.Key)
-                         .ToArray())
-            {
+            foreach (var key in _outgoing.Where(x => x.Value <= now).Select(x => x.Key).ToArray())
                 _outgoing.Remove(key);
-            }
 
             if (_outgoing.ContainsKey(text))
             {
                 _outgoing.Remove(text);
                 return true;
             }
-
             return false;
         }
     }
@@ -184,14 +187,11 @@ public sealed class BotEngine
     {
         if (seconds <= 0)
             return true;
-
         lock (_sync)
         {
             var now = DateTime.UtcNow;
-
             if (_cooldowns.TryGetValue(key, out var until) && until > now)
                 return false;
-
             _cooldowns[key] = now.AddSeconds(seconds);
             return true;
         }
@@ -202,19 +202,15 @@ public sealed class BotEngine
         args = "";
         content = content.Trim();
         trigger = trigger.Trim();
-
         if (string.IsNullOrWhiteSpace(trigger))
             return false;
-
         if (content.Equals(trigger, StringComparison.OrdinalIgnoreCase))
             return true;
-
         if (content.StartsWith(trigger + " ", StringComparison.OrdinalIgnoreCase))
         {
             args = content[(trigger.Length + 1)..].Trim();
             return true;
         }
-
         return false;
     }
 
@@ -222,13 +218,10 @@ public sealed class BotEngine
     {
         var p = permission.Trim().ToLowerInvariant();
         var r = role.Trim().ToLowerInvariant();
-
         return p switch
         {
             "" or "전체" or "everyone" => true,
-            "매니저" or "manager" => r is "streamer"
-                or "streaming_channel_manager"
-                or "streaming_chat_manager",
+            "매니저" or "manager" => r is "streamer" or "streaming_channel_manager" or "streaming_chat_manager",
             "스트리머" or "streamer" => r == "streamer",
             _ => false
         };
