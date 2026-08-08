@@ -13,9 +13,15 @@ public sealed class OverlayServer : IAsyncDisposable
     public const string OverlayUrl = "http://localhost:18766/roulette";
     public const string CallbackUrl = "http://localhost:18766/auth/callback";
 
+    private static readonly TimeSpan LateJoinReplayWindow = TimeSpan.FromSeconds(15);
+
     private readonly LocalDataStore _store;
     private readonly ConcurrentDictionary<Guid, Channel<string>> _clients = new();
+    private readonly object _rouletteSync = new();
+
     private WebApplication? _app;
+    private string? _lastRoulettePayload;
+    private DateTime _lastRouletteAtUtc = DateTime.MinValue;
 
     public Func<string, string, Task>? AuthorizationHandler { get; set; }
     public event Action<string>? Log;
@@ -67,23 +73,25 @@ public sealed class OverlayServer : IAsyncDisposable
             }
         });
 
-        _app.MapGet("/api/roulette", () =>
-        {
-            return Results.Json(
-                _store.Data.RouletteItems
-                    .Where(x => x.ChancePercent > 0 && !string.IsNullOrWhiteSpace(x.Text))
-                    .Select(x => new { text = x.Text, chance = x.ChancePercent })
-                    .ToArray());
-        });
+        _app.MapGet("/api/roulette", () => Results.Json(
+            _store.Data.RouletteItems
+                .Where(x => x.ChancePercent > 0 && !string.IsNullOrWhiteSpace(x.Text))
+                .Select(x => new { text = x.Text, chance = x.ChancePercent })
+                .ToArray()));
 
         _app.MapGet("/events", async (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-cache";
+            context.Response.Headers["X-Accel-Buffering"] = "no";
             context.Response.ContentType = "text/event-stream";
 
             var id = Guid.NewGuid();
             var channel = Channel.CreateUnbounded<string>();
             _clients[id] = channel;
+
+            var replay = GetRecentRoulettePayload();
+            if (replay is not null)
+                channel.Writer.TryWrite(replay);
 
             try
             {
@@ -102,7 +110,11 @@ public sealed class OverlayServer : IAsyncDisposable
             }
         });
 
-        _app.MapGet("/roulette", () => Results.Content(OverlayHtml, "text/html; charset=utf-8"));
+        _app.MapGet("/roulette", (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            return Results.Content(OverlayHtml, "text/html; charset=utf-8");
+        });
 
         await _app.StartAsync();
         Log?.Invoke($"OBS 오버레이 준비 완료: {OverlayUrl}");
@@ -118,14 +130,33 @@ public sealed class OverlayServer : IAsyncDisposable
         var json = JsonSerializer.Serialize(new
         {
             type = "roulette",
+            eventId = Guid.NewGuid(),
             result = result.Text,
             index = result.Index,
             user = result.User,
             items
         });
 
+        lock (_rouletteSync)
+        {
+            _lastRoulettePayload = json;
+            _lastRouletteAtUtc = DateTime.UtcNow;
+        }
+
         foreach (var client in _clients.Values)
             await client.Writer.WriteAsync(json);
+    }
+
+    private string? GetRecentRoulettePayload()
+    {
+        lock (_rouletteSync)
+        {
+            if (_lastRoulettePayload is null)
+                return null;
+            if (DateTime.UtcNow - _lastRouletteAtUtc > LateJoinReplayWindow)
+                return null;
+            return _lastRoulettePayload;
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -153,9 +184,12 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent
 #hub{position:absolute;z-index:4;left:50%;top:50%;transform:translate(-50%,-50%);width:90px;height:90px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;font-weight:900;color:#6d4bd1;box-shadow:0 4px 16px #0004}
 #result{position:absolute;left:50%;bottom:3%;transform:translateX(-50%) scale(.8);opacity:0;background:#171820ee;color:white;border-radius:18px;padding:14px 28px;font-weight:900;font-size:27px;white-space:nowrap;transition:.2s}
 #result.show{opacity:1;transform:translateX(-50%) scale(1)}
+#previewBadge{position:absolute;top:18px;left:50%;transform:translateX(-50%);background:#171820cc;color:white;padding:8px 14px;border-radius:999px;font-size:14px;font-weight:700;display:none}
+body.preview #previewBadge{display:block}
 </style>
 </head>
 <body>
+<div id="previewBadge">미리보기 · OBS에서는 평소 투명하게 표시됩니다</div>
 <div id="stage">
   <div id="wrap">
     <div id="pointer"></div><div id="wheel"></div><div id="hub">PODO</div>
@@ -163,25 +197,36 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent
   <div id="result"></div>
 </div>
 <script>
-const stage=document.querySelector('#stage'),wheel=document.querySelector('#wheel'),result=document.querySelector('#result');
+const stage=document.querySelector('#stage');
+const wheel=document.querySelector('#wheel');
+const result=document.querySelector('#result');
 const colors=['#8b6de3','#67c6c0','#f1a5bd','#f5cc74','#8eb8ed','#a7d88d','#f0a26e','#c39be8'];
+const params=new URLSearchParams(location.search);
+const forcedPreview=params.get('preview')==='1';
+const isObs=typeof window.obsstudio!=='undefined';
+const preview=forcedPreview||!isObs;
+if(preview){document.body.classList.add('preview');stage.classList.add('show');}
 let rotation=0;
+let lastEventId='';
 function paint(items){
  let a=0,p=[];
  for(let i=0;i<items.length;i++){let s=a;a+=+items[i].chance||0;p.push(`${colors[i%colors.length]} ${s*3.6}deg ${a*3.6}deg`)}
  wheel.style.background=items.length?`conic-gradient(${p.join(',')})`:'#ddd';
 }
 function angle(items,index){let a=0;for(let i=0;i<index;i++)a+=+items[i].chance||0;return (a+(+items[index]?.chance||0)/2)*3.6}
-new EventSource('/events').onmessage=e=>{
- const d=JSON.parse(e.data); if(d.type!=='roulette')return;
- paint(d.items||[]); stage.classList.add('show'); result.classList.remove('show');
- const target=angle(d.items||[],d.index); const base=2160;
- rotation += base + (360-target) + (360-(rotation%360));
+function play(d){
+ if(d.eventId&&d.eventId===lastEventId)return;
+ lastEventId=d.eventId||'';
+ paint(d.items||[]);stage.classList.add('show');result.classList.remove('show');
+ const target=angle(d.items||[],d.index);const base=2160;
+ rotation+=base+(360-target)+(360-(rotation%360));
  wheel.style.transform=`rotate(${rotation}deg)`;
  setTimeout(()=>{result.textContent=`${d.user} → ${d.result}`;result.classList.add('show')},3500);
- setTimeout(()=>{result.classList.remove('show');stage.classList.remove('show')},6500);
-};
-fetch('/api/roulette').then(r=>r.json()).then(paint);
+ setTimeout(()=>{result.classList.remove('show');if(!preview)stage.classList.remove('show')},6500);
+}
+const events=new EventSource('/events');
+events.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='roulette')play(d)}catch{}};
+fetch('/api/roulette',{cache:'no-store'}).then(r=>r.json()).then(paint).catch(()=>paint([]));
 </script>
 </body>
 </html>
