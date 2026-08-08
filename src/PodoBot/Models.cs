@@ -2,6 +2,7 @@ namespace PodoBot;
 
 public sealed class AppData
 {
+    public int DataVersion { get; set; } = 2;
     public List<BotCommand> Commands { get; set; } = new();
     public List<RouletteItem> RouletteItems { get; set; } = new();
     public RouletteSettings Roulette { get; set; } = new();
@@ -12,6 +13,7 @@ public sealed class AppData
     {
         return new AppData
         {
+            DataVersion = 2,
             Commands =
             [
                 new BotCommand
@@ -19,7 +21,7 @@ public sealed class AppData
                     Trigger = "!공지",
                     Response = "오늘 방송도 재밌게 봐주세요!",
                     Permission = "전체",
-                    Enabled = false
+                    Enabled = true
                 }
             ],
             RouletteItems =
