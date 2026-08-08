@@ -1,0 +1,182 @@
+name: Build PodoBot Setup
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Inject private CHZZK app credentials
+        shell: pwsh
+        env:
+          CHZZK_CLIENT_ID: ${{ secrets.CHZZK_CLIENT_ID }}
+          CHZZK_CLIENT_SECRET: ${{ secrets.CHZZK_CLIENT_SECRET }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CHZZK_CLIENT_ID)) {
+            throw "GitHub Secret CHZZK_CLIENT_ID is missing."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:CHZZK_CLIENT_SECRET)) {
+            throw "GitHub Secret CHZZK_CLIENT_SECRET is missing."
+          }
+
+          function Escape-CSharp([string]$value) {
+            return $value.Replace('\', '\\').Replace('"', '\"')
+          }
+
+          $clientId = Escape-CSharp $env:CHZZK_CLIENT_ID
+          $clientSecret = Escape-CSharp $env:CHZZK_CLIENT_SECRET
+
+          @"
+          namespace PodoBot;
+
+          internal static class EmbeddedChzzkConfig
+          {
+              public const string ClientId = "$clientId";
+              public const string ClientSecret = "$clientSecret";
+              public const string RedirectUri = "http://localhost:18766/auth/callback";
+              public static bool IsConfigured => true;
+          }
+          "@ | Set-Content -Encoding UTF8 "src/PodoBot/EmbeddedChzzkConfig.cs"
+
+      - name: Restore
+        run: dotnet restore PodoBot.sln
+
+      - name: Publish self-contained Windows app
+        shell: pwsh
+        run: |
+          if (Test-Path publish) {
+            Remove-Item publish -Recurse -Force
+          }
+
+          dotnet publish src/PodoBot/PodoBot.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            --no-restore `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -o publish
+
+      - name: Optional code-sign PodoBot.exe
+        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "podobot-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_BASE64))
+
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" `
+            -Filter signtool.exe -Recurse |
+            Where-Object { $_.FullName -match "\\x64\\signtool.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          if (-not $signtool) {
+            throw "signtool.exe was not found."
+          }
+
+          & $signtool.FullName sign `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr http://timestamp.digicert.com `
+            /f $pfx `
+            /p $env:CERT_PASSWORD `
+            "publish\PodoBot.exe"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "0.3.$env:GITHUB_RUN_NUMBER"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          }
+
+          $iscc = Get-ChildItem `
+            "C:\Program Files (x86)\Inno Setup *\ISCC.exe" `
+            -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          if (-not $iscc) {
+            throw "Inno Setup compiler ISCC.exe was not found."
+          }
+
+          Push-Location installer
+          & $iscc.FullName "/DMyAppVersion=$version" "PodoBot.iss"
+          Pop-Location
+
+      - name: Optional code-sign installer
+        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "podobot-signing.pfx"
+          if (-not (Test-Path $pfx)) {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_BASE64))
+          }
+
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" `
+            -Filter signtool.exe -Recurse |
+            Where-Object { $_.FullName -match "\\x64\\signtool.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          & $signtool.FullName sign `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr http://timestamp.digicert.com `
+            /f $pfx `
+            /p $env:CERT_PASSWORD `
+            "installer\output\PodoBotSetup.exe"
+
+      - name: Upload PodoBotSetup
+        uses: actions/upload-artifact@v4
+        with:
+          name: PodoBotSetup
+          path: installer/output/PodoBotSetup.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $file = "installer\output\PodoBotSetup.exe"
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $file --clobber
+          }
+          else {
+            gh release create $tag $file `
+              --title "PodoBot $tag" `
+              --notes "PodoBot Windows installer"
+          }
