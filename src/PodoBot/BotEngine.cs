@@ -1,0 +1,236 @@
+using System.Security.Cryptography;
+
+namespace PodoBot;
+
+public sealed class BotEngine
+{
+    private readonly LocalDataStore _store;
+    private readonly Func<string, Task> _send;
+    private readonly Func<RouletteResult, Task> _rouletteOverlay;
+    private readonly Dictionary<string, DateTime> _cooldowns = new();
+    private readonly Dictionary<string, DateTime> _outgoing = new();
+    private readonly object _sync = new();
+
+    public event Action<string>? Log;
+
+    public BotEngine(
+        LocalDataStore store,
+        Func<string, Task> send,
+        Func<RouletteResult, Task> rouletteOverlay)
+    {
+        _store = store;
+        _send = send;
+        _rouletteOverlay = rouletteOverlay;
+    }
+
+    public void NotifyOutgoing(string text)
+    {
+        lock (_sync)
+        {
+            _outgoing[text] = DateTime.UtcNow.AddSeconds(8);
+        }
+    }
+
+    public async Task ProcessAsync(ChatEvent chat)
+    {
+        if (string.IsNullOrWhiteSpace(chat.Content))
+            return;
+
+        if (IsBotEcho(chat.Content))
+            return;
+
+        Log?.Invoke($"{chat.Nickname}: {chat.Content}");
+
+        if (await TryCommandAsync(chat))
+            return;
+
+        if (await TryRouletteAsync(chat))
+            return;
+
+        await TryCounterAsync(chat);
+    }
+
+    private async Task<bool> TryCommandAsync(ChatEvent chat)
+    {
+        foreach (var command in _store.Data.Commands.Where(x => x.Enabled))
+        {
+            if (!Match(chat.Content, command.Trigger, out var args))
+                continue;
+
+            if (!HasPermission(command.Permission, chat.UserRoleCode))
+                return true;
+
+            if (!Acquire($"cmd:{command.Id}:all", command.CooldownSeconds))
+                return true;
+
+            if (!Acquire(
+                    $"cmd:{command.Id}:user:{chat.SenderChannelId}",
+                    command.UserCooldownSeconds))
+                return true;
+
+            var text = command.Response
+                .Replace("{user}", chat.Nickname)
+                .Replace("{args}", args);
+
+            await _send(text);
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryRouletteAsync(ChatEvent chat)
+    {
+        var settings = _store.Data.Roulette;
+
+        if (!settings.Enabled
+            || !Match(chat.Content, settings.Trigger, out _))
+            return false;
+
+        if (!HasPermission(settings.Permission, chat.UserRoleCode))
+            return true;
+
+        if (!Acquire("roulette:all", settings.CooldownSeconds))
+            return true;
+
+        if (!Acquire(
+                $"roulette:user:{chat.SenderChannelId}",
+                settings.UserCooldownSeconds))
+            return true;
+
+        var items = _store.Data.RouletteItems
+            .Where(x => !string.IsNullOrWhiteSpace(x.Text)
+                        && x.ChancePercent > 0)
+            .ToList();
+
+        var total = items.Sum(x => x.ChancePercent);
+        if (items.Count == 0 || Math.Abs(total - 100) > 0.001)
+        {
+            Log?.Invoke("룰렛 확률 합계가 100%인지 확인하세요.");
+            return true;
+        }
+
+        var roll = RandomNumberGenerator.GetInt32(0, 1_000_000) / 10_000.0;
+        var sum = 0.0;
+        var index = items.Count - 1;
+
+        for (var i = 0; i < items.Count; i++)
+        {
+            sum += items[i].ChancePercent;
+            if (roll < sum)
+            {
+                index = i;
+                break;
+            }
+        }
+
+        var result = items[index];
+        var text = settings.Response
+            .Replace("{user}", chat.Nickname)
+            .Replace("{result}", result.Text);
+
+        await _send(text);
+        await _rouletteOverlay(
+            new RouletteResult(result.Text, index, chat.Nickname));
+
+        Log?.Invoke($"룰렛 결과: {chat.Nickname} -> {result.Text}");
+        return true;
+    }
+
+    private async Task<bool> TryCounterAsync(ChatEvent chat)
+    {
+        foreach (var counter in _store.Data.Counters.Where(x => x.Enabled))
+        {
+            if (!Match(chat.Content, counter.Trigger, out _))
+                continue;
+
+            if (!HasPermission(counter.Permission, chat.UserRoleCode))
+                return true;
+
+            counter.Value += counter.Step;
+            await _store.SaveAsync();
+            await _send($"{counter.Name}: {counter.Value}");
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool IsBotEcho(string text)
+    {
+        lock (_sync)
+        {
+            var now = DateTime.UtcNow;
+
+            foreach (var key in _outgoing
+                         .Where(x => x.Value <= now)
+                         .Select(x => x.Key)
+                         .ToArray())
+            {
+                _outgoing.Remove(key);
+            }
+
+            if (_outgoing.ContainsKey(text))
+            {
+                _outgoing.Remove(text);
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    private bool Acquire(string key, int seconds)
+    {
+        if (seconds <= 0)
+            return true;
+
+        lock (_sync)
+        {
+            var now = DateTime.UtcNow;
+
+            if (_cooldowns.TryGetValue(key, out var until) && until > now)
+                return false;
+
+            _cooldowns[key] = now.AddSeconds(seconds);
+            return true;
+        }
+    }
+
+    private static bool Match(string content, string trigger, out string args)
+    {
+        args = "";
+        content = content.Trim();
+        trigger = trigger.Trim();
+
+        if (string.IsNullOrWhiteSpace(trigger))
+            return false;
+
+        if (content.Equals(trigger, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (content.StartsWith(trigger + " ", StringComparison.OrdinalIgnoreCase))
+        {
+            args = content[(trigger.Length + 1)..].Trim();
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool HasPermission(string permission, string role)
+    {
+        var p = permission.Trim().ToLowerInvariant();
+        var r = role.Trim().ToLowerInvariant();
+
+        return p switch
+        {
+            "" or "전체" or "everyone" => true,
+            "매니저" or "manager" => r is "streamer"
+                or "streaming_channel_manager"
+                or "streaming_chat_manager",
+            "스트리머" or "streamer" => r == "streamer",
+            _ => false
+        };
+    }
+}
